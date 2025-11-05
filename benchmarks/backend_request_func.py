@@ -655,10 +655,16 @@ async def async_request_cerebras_chat_completions(
 
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
-        # content = [{"role": "user", "content": request_func_input.prompt}]
-
         
         content = request_func_input.prompt
+        try:
+            if request_func_input.extra_body["structured_outputs"] == "json_object":
+                content += "\n Please provide the output in JSON format."
+                response_format = request_func_input.extra_body["structured_outputs"]
+        except:
+            response_format = None
+            pass
+
         payload = {
             "model": request_func_input.model_name \
                 if request_func_input.model_name else request_func_input.model,
@@ -672,6 +678,9 @@ async def async_request_cerebras_chat_completions(
             "max_tokens": request_func_input.output_len,
             "stream": True,
         }
+
+        if response_format:
+            payload["response_format"] = {"type": response_format }
         
         headers = {
             "Content-Type": "application/json",

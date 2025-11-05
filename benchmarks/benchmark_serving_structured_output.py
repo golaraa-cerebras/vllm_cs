@@ -313,8 +313,8 @@ def sample_requests(
                 prompt=req[0],
                 prompt_len=req[1],
                 expected_output_len=req[2],
-                schema={},
-                structure_type="json",
+                schema="json_object",
+                structure_type=args.structure_type,
             )
             for req in samples
         ]
@@ -653,8 +653,9 @@ async def benchmark(
     def prepare_extra_body(request) -> dict:
         extra_body = {}
         # Add the schema to the extra_body
-        extra_body["structured_outputs"] = {}
-        extra_body["structured_outputs"][request.structure_type] = request.schema
+        # extra_body["structured_outputs"] = {}
+        # extra_body["structured_outputs"][request.structure_type] = request.schema
+        extra_body["structured_outputs"] = request.schema
         return extra_body
 
     print("Starting initial single prompt test run...")
@@ -1038,33 +1039,6 @@ def main(args: argparse.Namespace):
     elif args.dataset == "choice":
         args.structure_type = "choice"
     
-    elif args.dataset == "mt-bench-oai":
-        # Do not format the prompt, pass to message directly
-        input_requests = sample_mt_bench_oai(
-            dataset_path=args.dataset_path,
-            num_requests=args.num_prompts,
-        )
-        input_requests = [(prompt, prompt_len, output_len, None)
-                          for prompt, prompt_len,
-                          output_len in input_requests]
-        args.structure_type = "json"
-
-    elif args.dataset == "random":
-        input_requests = sample_random_requests(
-            prefix_len=args.random_prefix_len,
-            input_len=args.random_input_len,
-            output_len=args.random_output_len,
-            num_prompts=args.num_prompts,
-            range_ratio=args.random_range_ratio,
-            tokenizer=tokenizer,
-        )
-        args.structure_type = "json"
-    elif args.dataset == "longcontext-qa":
-        input_requests = sample_longcontext_requests(
-            dataset_path=args.dataset_path,
-            num_requests=args.num_prompts,
-        )
-        args.structure_type = "json"
     else:
         args.structure_type = "json"
 
@@ -1092,8 +1066,8 @@ def main(args: argparse.Namespace):
 
     # Configure logging to save to a file
     current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
-    # log_file = file_name = f"{backend}-{args.model}-{current_dt}_output.log"
-    log_file = file_name = f"{backend}-{current_dt}_output.log"
+    log_file = file_name = f"{backend}-{args.model}-{current_dt}_output.log"
+    # log_file = file_name = f"{backend}-{current_dt}_output.log"
     os.makedirs(os.path.join(args.result_dir, 'logs'), exist_ok=True)
     logging.basicConfig(filename=str(os.path.join(args.result_dir, 'logs', log_file)), level=logging.INFO)
 
