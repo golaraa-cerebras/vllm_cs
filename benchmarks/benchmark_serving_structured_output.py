@@ -303,7 +303,6 @@ def sample_requests(
         ]
     elif args.dataset == "longcontext-qa":
         samples = sample_longcontext_requests(
-            dataset_path=args.dataset_path,
             num_requests=args.num_prompts,
             encoding_name="o200k_base",
         )
@@ -318,7 +317,26 @@ def sample_requests(
             )
             for req in samples
         ]
-    
+    elif args.dataset == "random":
+        samples = sample_random_requests(
+            prefix_len= 0,
+            input_len =  args.random_input_len,
+            output_len = args.random_output_len,
+            num_prompts = args.num_prompts,
+            range_ratio = args.random_range_ratio,
+            encoding_name="o200k_base",
+        )
+
+        requests = [
+            SampleRequest(
+                prompt=req[0],
+                prompt_len=req[1],
+                expected_output_len=req[2],
+                schema="json_object",
+                structure_type=args.structure_type,
+            )
+            for req in samples
+        ]
     return requests
 
 def load_mt_bench_data(data_file: str, begin: Optional[int] = None, end: Optional[int] = None):
@@ -371,36 +389,32 @@ def sample_random_requests(
     output_len: int,
     num_prompts: int,
     range_ratio: float,
-    tokenizer: PreTrainedTokenizerBase,
+    encoding_name: str = "o200k_base",
 ) -> List[Tuple[str, int, int]]:
-    prefix_token_ids = np.random.randint(0,
-                                         tokenizer.vocab_size,
-                                         size=prefix_len).tolist()
+    
+    tokenizer = tiktoken.get_encoding(encoding_name)
+    prefix_token_ids = np.random.randint(0,tokenizer.n_vocab-1,size=prefix_len).tolist()
 
-    input_lens = np.random.randint(
-        int(input_len * range_ratio),
-        input_len + 1,
-        size=num_prompts,
-    )
-    output_lens = np.random.randint(
-        int(output_len * range_ratio),
-        output_len + 1,
-        size=num_prompts,
-    )
-    offsets = np.random.randint(0, tokenizer.vocab_size, size=num_prompts)
+    input_lens = np.random.randint(int(input_len * range_ratio),input_len + 1,size=num_prompts,)
+    output_lens = np.random.randint(int(output_len * range_ratio),output_len + 1,size=num_prompts,)
+    offsets = np.random.randint(0, tokenizer.n_vocab-1, size=num_prompts)
+
+    
     input_requests = []
     for i in range(num_prompts):
-        prompt = tokenizer.decode(prefix_token_ids +
-                                  [(offsets[i] + i + j) % tokenizer.vocab_size
-                                   for j in range(input_lens[i])])
-
-        input_requests.append((prompt, int(prefix_len + input_lens[i]),
-                               int(output_lens[i]), None))
+        tokens = prefix_token_ids +[(offsets[i] + i + j) % (tokenizer.n_vocab-1000) for j in range(input_lens[i])]
+        
+        try:
+            prompt = tokenizer.decode(tokens)
+            input_requests.append((prompt, int(prefix_len + input_lens[i]), int(output_lens[i])))
+        except:
+            print(f'unacceptable tokens: {tokens}, skipping...')
+            continue
+        
 
     return input_requests
 
 def sample_longcontext_requests(
-        dataset_path: str,
         num_requests: int,
         encoding_name: str = "o200k_base"
     ) -> List[Tuple[str, int, int]]:
@@ -762,52 +776,35 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+
     if max_concurrency is not None:
         print("{:<40} {:<10}".format("Maximum request concurrency:", max_concurrency))
+        logger.info("{:<40} {:<10}".format("Maximum request concurrency:", max_concurrency))
     if request_rate != float("inf"):
         print("{:<40} {:<10.2f}".format("Request rate configured (RPS):", request_rate))
+        logger.info("{:<40} {:<10.2f}".format("Request rate configured (RPS):", request_rate))
+
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
     print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
-    print(
-        "{:<40} {:<10.2f}".format(
-            "Request throughput (req/s):", metrics.request_throughput
-        )
-    )
+    print("{:<40} {:<10.2f}".format("Request throughput (req/s):", metrics.request_throughput))
 
     logger.info("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
     logger.info("{:<40} {:<10}".format("Successful requests:", metrics.completed))
-    logger.info("{:<40} {:<10.2f}".format("Benchmark duration (s):",
-                                    benchmark_duration))
+    logger.info("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
     logger.info("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
-    logger.info("{:<40} {:<10}".format("Total generated tokens:",
-                                 metrics.total_output))
-    logger.info("{:<40} {:<10.2f}".format("Request throughput (req/s):",
-                                    metrics.request_throughput))
+    logger.info("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
+    logger.info("{:<40} {:<10.2f}".format("Request throughput (req/s):", metrics.request_throughput))
 
     if goodput_config_dict:
-        print(
-            "{:<40} {:<10.2f}".format(
-                "Request goodput (req/s):", metrics.request_goodput
-            )
-        )
-        logger.info("{:<40} {:<10.2f}".format("Request goodput (req/s):",
-                                        metrics.request_goodput))
-    print(
-        "{:<40} {:<10.2f}".format(
-            "Output token throughput (tok/s):", metrics.output_throughput
-        )
-    )
-    print(
-        "{:<40} {:<10.2f}".format(
-            "Total Token throughput (tok/s):", metrics.total_token_throughput
-        )
-    )
+        print("{:<40} {:<10.2f}".format("Request goodput (req/s):", metrics.request_goodput))
+        logger.info("{:<40} {:<10.2f}".format("Request goodput (req/s):", metrics.request_goodput))
 
-    logger.info("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
-                                    metrics.output_throughput))
-    logger.info("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
-                                    metrics.total_token_throughput))
+    print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):", metrics.output_throughput))
+    print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):", metrics.total_token_throughput))
+
+    logger.info("{:<40} {:<10.2f}".format("Output token throughput (tok/s):", metrics.output_throughput))
+    logger.info("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):", metrics.total_token_throughput))
 
     result = {
         "duration": benchmark_duration,
@@ -1308,7 +1305,7 @@ def create_argument_parser():
     random_group.add_argument(
         "--random-input-len",
         type=int,
-        default=1024,
+        default=256,
         help=
         "Number of input tokens per request, used only for random sampling.",
     )
@@ -1332,8 +1329,8 @@ def create_argument_parser():
         default=0,
         help="Number of fixed prefix tokens before random "
         " context. The length range of context in a random "
-        " request is [random-prefix-len, "
-        " random-prefix-len + random-prefix-len * random-range-ratio).")
+        " request is " \
+        "prefix_token_ids +[(offsets[i] + i + j) % (tokenizer.n_vocab-1000) for j in range(input_lens[i])]")
 
     parser.add_argument("--dataset-path",
                         type=str,

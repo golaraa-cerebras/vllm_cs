@@ -8,3 +8,7 @@ To run the benchmark:
         --request-rate 5 \
         --num-prompts 30
 ```
+If you'd like to disable structured outputs, you can add:
+```
+--no-structured-output
+```
