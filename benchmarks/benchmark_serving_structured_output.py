@@ -321,7 +321,7 @@ def sample_mt_bench_oai(
     encoding = tiktoken.get_encoding(encoding_name)
 
     # Load the dataset subsets 21 to 51 to cover math, reasoning and coding as examples of stronger draft alignment.
-    mt_bench_df = load_mt_bench_data(os.path.join(dataset_path, "question.jsonl"), begin=21, end=51)
+    mt_bench_df = load_mt_bench_data(os.path.join(dataset_path, "question.jsonl")) #, begin=21, end=51
 
     # Load all MT bench sample data
     # questions_df = load_mt_bench_data(os.path.join(dataset_path, "question.jsonl"))
@@ -334,7 +334,10 @@ def sample_mt_bench_oai(
     for row in mt_bench_df.itertuples():
         if row.Index >= num_requests:
             break
-
+        if type(row.reference) is not list:
+            continue
+        # print(row)
+        # print('--------------')
         user_prompt = row.turns[0]
         output = row.reference[0]
         output_len = len(encoding.encode(output))
@@ -1218,7 +1221,7 @@ def create_argument_parser():
     parser.add_argument(
         "--percentile-metrics",
         type=str,
-        default="ttft,tpot,itl",
+        default="ttft,tpot,itl,cerebras_ttft,cerebras_tpot,cerebras_e2el",
         help="Comma-separated list of selected metrics to report percentiles. "
         "This argument specifies the metrics to report percentiles. "
         'Allowed metric names are "ttft", "tpot", "itl", "e2el". '
