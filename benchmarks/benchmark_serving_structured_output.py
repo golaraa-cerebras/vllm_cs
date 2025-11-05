@@ -301,6 +301,24 @@ def sample_requests(
             )
             for req in samples
         ]
+    elif args.dataset == "longcontext-qa":
+        samples = sample_longcontext_requests(
+            dataset_path=args.dataset_path,
+            num_requests=args.num_prompts,
+            encoding_name="o200k_base",
+        )
+
+        requests = [
+            SampleRequest(
+                prompt=req[0],
+                prompt_len=req[1],
+                expected_output_len=req[2],
+                schema={},
+                structure_type="json",
+            )
+            for req in samples
+        ]
+    
     return requests
 
 def load_mt_bench_data(data_file: str, begin: Optional[int] = None, end: Optional[int] = None):
@@ -380,6 +398,33 @@ def sample_random_requests(
                                int(output_lens[i]), None))
 
     return input_requests
+
+def sample_longcontext_requests(
+        dataset_path: str,
+        num_requests: int,
+        encoding_name: str = "o200k_base"
+    ) -> List[Tuple[str, int, int]]:
+    """
+    https://huggingface.co/datasets/Abzu/long-context-qa-df/viewer/default/train?row=0&views%5B%5D=train
+    """
+    encoding = tiktoken.get_encoding(encoding_name)
+    from datasets import load_dataset
+    sentences = pd.DataFrame(load_dataset("Abzu/long-context-qa-df",'default')['train']).sample(n=num_requests, random_state=1, ignore_index=True) 
+    sampled_requests: List[Tuple[str, int, int]] = []
+
+    
+    for i in range(len(sentences)):
+
+        user_prompt = sentences.loc[i,'prompt'] + '\n Based on the given context, asnwer this: ' + sentences.loc[i,'question']
+        output = sentences.loc[i,'right_answer']
+        output_len = len(encoding.encode(output))
+        input_len = len(encoding.encode(user_prompt))
+        sampled_requests.append(
+            (user_prompt, input_len, output_len))
+
+    return sampled_requests
+
+
 
 async def get_request(
     input_requests: list[SampleRequest],
@@ -808,17 +853,33 @@ async def benchmark(
             return
         print("{s:{c}^{n}}".format(s=metric_header, n=50, c="-"))
         print(
-            "{:<40} {:<10.2f}".format(
+            "{:<40} {:<10.3f}".format(
                 f"Mean {metric_name} (ms):",
                 getattr(metrics, f"mean_{metric_attribute_name}_ms"),
             )
         )
         print(
-            "{:<40} {:<10.2f}".format(
+            "{:<40} {:<10.3f}".format(
                 f"Median {metric_name} (ms):",
                 getattr(metrics, f"median_{metric_attribute_name}_ms"),
             )
         )
+
+        logger.info("{s:{c}^{n}}".format(s=metric_header, n=50, c="-"))
+        logger.info(
+            "{:<40} {:<10.3f}".format(
+                f"Mean {metric_name} (ms):",
+                getattr(metrics, f"mean_{metric_attribute_name}_ms"),
+            )
+        )
+        logger.info(
+            "{:<40} {:<10.3f}".format(
+                f"Median {metric_name} (ms):",
+                getattr(metrics, f"median_{metric_attribute_name}_ms"),
+            )
+        )
+
+
         result[f"mean_{metric_attribute_name}_ms"] = getattr(
             metrics, f"mean_{metric_attribute_name}_ms"
         )
@@ -830,7 +891,8 @@ async def benchmark(
         )
         for p, value in getattr(metrics, f"percentiles_{metric_attribute_name}_ms"):
             p_word = str(int(p)) if int(p) == p else str(p)
-            print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):", value))
+            print("{:<40} {:<10.3f}".format(f"P{p_word} {metric_name} (ms):", value))
+            logger.info("{:<40} {:<10.3f}".format(f"P{p_word} {metric_name} (ms):", value))
             result[f"p{p_word}_{metric_attribute_name}_ms"] = value
 
     process_one_metric("ttft", "TTFT", "Time to First Token")
@@ -997,6 +1059,12 @@ def main(args: argparse.Namespace):
             tokenizer=tokenizer,
         )
         args.structure_type = "json"
+    elif args.dataset == "longcontext-qa":
+        input_requests = sample_longcontext_requests(
+            dataset_path=args.dataset_path,
+            num_requests=args.num_prompts,
+        )
+        args.structure_type = "json"
     else:
         args.structure_type = "json"
 
@@ -1106,7 +1174,7 @@ def create_argument_parser():
     parser.add_argument(
         "--dataset",
         default="json",
-        choices=["json", "json-unique", "grammar", "regex", "choice", "xgrammar_bench", "random", "mt-bench-oai"],
+        choices=["json", "json-unique", "grammar", "regex", "choice", "xgrammar_bench", "random", "mt-bench-oai", "longcontext-qa"],
     )
     parser.add_argument(
         "--json-schema-path", type=str, default=None, help="Path to json schema."
@@ -1224,13 +1292,13 @@ def create_argument_parser():
         default="ttft,tpot,itl,cerebras_ttft,cerebras_tpot,cerebras_e2el",
         help="Comma-separated list of selected metrics to report percentiles. "
         "This argument specifies the metrics to report percentiles. "
-        'Allowed metric names are "ttft", "tpot", "itl", "e2el". '
+        'Allowed metric names are "ttft", "tpot", "itl", "e2el". ' # fix this
         'Default value is "ttft,tpot,itl".',
     )
     parser.add_argument(
         "--metric-percentiles",
         type=str,
-        default="99",
+        default="50,99",
         help="Comma-separated list of percentiles for selected metrics. "
         'To report 25-th, 50-th, and 75-th percentiles, use "25,50,75". '
         'Default value is "99". '

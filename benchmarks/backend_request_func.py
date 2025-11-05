@@ -723,10 +723,11 @@ async def async_request_cerebras_chat_completions(
                                     output.cerebras_queue_time = data.get("time_info").get("queue_time")
                                     output.cerebras_prompt_time = data.get("time_info").get("prompt_time")
                                     output.cerebras_completion_time = data.get("time_info").get("completion_time")
-                                    output.cerebras_total_time = data.get("time_info").get("total_time")
+                                    output.cerebras_e2el = data.get("time_info").get("total_time")
                                     output.cerebras_ttft = output.cerebras_queue_time + output.cerebras_prompt_time
                                     output.cerebras_tpot = output.cerebras_completion_time/output.output_tokens
-                                    output.cerebras_prompt_ttft = output.cerebras_total_time
+                                    
+                                    
 
                                 # generated_text += content or ""
                             elif usage := data.get("usage"):
