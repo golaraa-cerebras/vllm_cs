@@ -1007,7 +1007,7 @@ def check_goodput_args(args):
 
 
 def main(args: argparse.Namespace):
-    print(args)
+    
     random.seed(args.seed)
     np.random.seed(args.seed)
 
@@ -1039,8 +1039,12 @@ def main(args: argparse.Namespace):
     else:
         args.structure_type = "json"
 
+    if args.dataset == "random":
+        args.no_structured_output = True
     if args.no_structured_output:
         args.structured_output_ratio = 0
+
+    
     if args.save_results:
         result_file_name = f"{args.structured_output_ratio}so"
         result_file_name += f"_{backend}"
@@ -1053,6 +1057,7 @@ def main(args: argparse.Namespace):
     else:
         result_file_name = None
 
+    print(args)
     input_requests = sample_requests(tokenizer, args)
 
     goodput_config_dict = check_goodput_args(args)
