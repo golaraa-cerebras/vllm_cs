@@ -45,6 +45,15 @@ from backend_request_func import (
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
+from typing import Any, AsyncGenerator, Collection, Dict, List, Optional, Tuple, Union
+import tiktoken
+import logging
+import gc
+from datetime import datetime
+from dotenv import load_dotenv
+load_dotenv()
+logger = logging.getLogger(__name__)
+
 try:
     from vllm.transformers_utils.tokenizer import get_tokenizer
 except ImportError:
@@ -55,9 +64,9 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from vllm.v1.structured_output.backend_xgrammar import (
-    has_xgrammar_unsupported_json_features,
-)
+# from vllm.v1.structured_output.backend_xgrammar import (
+#     has_xgrammar_unsupported_json_features,
+# )
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -90,6 +99,18 @@ class BenchmarkMetrics:
     median_e2el_ms: float
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
+    mean_cerebras_ttft_ms: float
+    median_cerebras_ttft_ms: float
+    std_cerebras_ttft_ms: float
+    percentiles_cerebras_ttft_ms: List[Tuple[float, float]]
+    mean_cerebras_tpot_ms: float
+    median_cerebras_tpot_ms: float
+    std_cerebras_tpot_ms: float
+    percentiles_cerebras_tpot_ms: List[Tuple[float, float]]
+    mean_cerebras_e2el_ms: float
+    median_cerebras_e2el_ms: float
+    std_cerebras_e2el_ms: float
+    percentiles_cerebras_e2el_ms: List[Tuple[float, float]]
 
 
 @dataclasses.dataclass
@@ -260,9 +281,102 @@ def sample_requests(
                     completion=completion,
                 )
             )
+    elif args.dataset == "mt-bench-oai":
 
+        
+
+        samples = sample_mt_bench_oai(
+            dataset_path=args.dataset_path,
+            num_requests=args.num_prompts,
+            encoding_name="o200k_base",
+        )
+        
+        requests = [
+            SampleRequest(
+                prompt=req[0],
+                prompt_len=req[1],
+                expected_output_len=req[2],
+                schema={},
+                structure_type="json",
+            )
+            for req in samples
+        ]
     return requests
 
+def load_mt_bench_data(data_file: str, begin: Optional[int] = None, end: Optional[int] = None):
+    """Load questions from a file."""
+    data = []
+    with open(data_file, "r") as d_file:
+        for line in d_file:
+            if line:
+                data.append(json.loads(line))
+    data = data[begin:end]
+    return pd.DataFrame(data)
+
+def sample_mt_bench_oai(
+    dataset_path: str,
+    num_requests: int,
+    encoding_name: str = "o200k_base"
+) -> List[Tuple[str, int, int]]:
+    encoding = tiktoken.get_encoding(encoding_name)
+
+    # Load the dataset subsets 21 to 51 to cover math, reasoning and coding as examples of stronger draft alignment.
+    mt_bench_df = load_mt_bench_data(os.path.join(dataset_path, "question.jsonl"), begin=21, end=51)
+
+    # Load all MT bench sample data
+    # questions_df = load_mt_bench_data(os.path.join(dataset_path, "question.jsonl"))
+    # answers_df = load_mt_bench_data(os.path.join(dataset_path, "model_answer", "gpt-3.5-turbo.jsonl"))
+
+    # mt_bench_df = pd.merge(questions_df, answers_df, on="question_id", how="inner", suffixes=('_q', '_a'))
+
+    # Sample the rest of lines per request.
+    sampled_requests: List[Tuple[str, int, int]] = []
+    for row in mt_bench_df.itertuples():
+        if row.Index >= num_requests:
+            break
+
+        user_prompt = row.turns[0]
+        output = row.reference[0]
+        output_len = len(encoding.encode(output))
+        input_len = len(encoding.encode(user_prompt))
+        sampled_requests.append(
+            (user_prompt, input_len, output_len))
+
+    return sampled_requests
+
+def sample_random_requests(
+    prefix_len: int,
+    input_len: int,
+    output_len: int,
+    num_prompts: int,
+    range_ratio: float,
+    tokenizer: PreTrainedTokenizerBase,
+) -> List[Tuple[str, int, int]]:
+    prefix_token_ids = np.random.randint(0,
+                                         tokenizer.vocab_size,
+                                         size=prefix_len).tolist()
+
+    input_lens = np.random.randint(
+        int(input_len * range_ratio),
+        input_len + 1,
+        size=num_prompts,
+    )
+    output_lens = np.random.randint(
+        int(output_len * range_ratio),
+        output_len + 1,
+        size=num_prompts,
+    )
+    offsets = np.random.randint(0, tokenizer.vocab_size, size=num_prompts)
+    input_requests = []
+    for i in range(num_prompts):
+        prompt = tokenizer.decode(prefix_token_ids +
+                                  [(offsets[i] + i + j) % tokenizer.vocab_size
+                                   for j in range(input_lens[i])])
+
+        input_requests.append((prompt, int(prefix_len + input_lens[i]),
+                               int(output_lens[i]), None))
+
+    return input_requests
 
 async def get_request(
     input_requests: list[SampleRequest],
@@ -313,10 +427,12 @@ def calculate_metrics(
     input_requests: list[tuple[str, int, int]],
     outputs: list[RequestFuncOutput],
     dur_s: float,
-    tokenizer: PreTrainedTokenizerBase,
+    # tokenizer: PreTrainedTokenizerBase,
+    tokenizer: Optional[Union[PreTrainedTokenizerBase, None]],
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float] | None = None,
+    encoding_name: str = "o200k_base",
 ) -> tuple[BenchmarkMetrics, list[int]]:
     actual_output_lens: list[int] = []
     total_input = 0
@@ -327,15 +443,25 @@ def calculate_metrics(
     all_tpots: list[float] = []
     ttfts: list[float] = []
     e2els: list[float] = []
+    cerebras_tpots: List[float] = []
+    cerebras_ttfts: List[float] = []
+    cerebras_e2els: List[float] = []
+
+    encoding = tiktoken.get_encoding(encoding_name)
+
     for i in range(len(outputs)):
         if outputs[i].success:
+            output_len = outputs[i].output_tokens
             # We use the tokenizer to count the number of output tokens for all
             # serving backends instead of looking at len(outputs[i].itl) since
             # multiple output tokens may be bundled together
             # Note : this may inflate the output token count slightly
-            output_len = len(
-                tokenizer(outputs[i].generated_text, add_special_tokens=False).input_ids
-            )
+            # output_len = len(
+            #     tokenizer(outputs[i].generated_text, add_special_tokens=False).input_ids
+            # )
+            if not output_len:
+                output_len = len(encoding.encode(outputs[i].generated_text))
+
             actual_output_lens.append(output_len)
             total_input += input_requests[i].prompt_len
             tpot = 0
@@ -349,6 +475,9 @@ def calculate_metrics(
             itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
             e2els.append(outputs[i].latency)
+            cerebras_ttfts.append(outputs[i].cerebras_ttft)
+            cerebras_tpots.append(outputs[i].cerebras_tpot)
+            cerebras_e2els.append(outputs[i].cerebras_e2el)
             completed += 1
         else:
             actual_output_lens.append(0)
@@ -372,6 +501,18 @@ def calculate_metrics(
             slo_values.append(
                 goodput_config_dict["e2el"] / MILLISECONDS_TO_SECONDS_CONVERSION
             )
+        if "cerebras_ttft" in goodput_config_dict:
+            valid_metrics.append(cerebras_ttfts)
+            slo_values.append(goodput_config_dict["ttft"] /
+                              MILLISECONDS_TO_SECONDS_CONVERSION)
+        if "cerebras_tpot" in goodput_config_dict:
+            valid_metrics.append(cerebras_tpots)
+            slo_values.append(goodput_config_dict["tpot"] /
+                              MILLISECONDS_TO_SECONDS_CONVERSION)
+        if "cerebras_e2el" in goodput_config_dict:
+            valid_metrics.append(e2els)
+            slo_values.append(goodput_config_dict["cerebras_e2el"] /
+                              MILLISECONDS_TO_SECONDS_CONVERSION)
 
         for req_metric in zip(*valid_metrics):
             is_good_req = all([s >= r for s, r in zip(slo_values, req_metric)])
@@ -417,6 +558,22 @@ def calculate_metrics(
         percentiles_e2el_ms=[
             (p, np.percentile(e2els or 0, p) * 1000) for p in selected_percentiles
         ],
+        mean_cerebras_ttft_ms=np.mean(cerebras_ttfts or 0) *
+                     1000,  # ttfts is empty if streaming is not supported by backend
+        std_cerebras_ttft_ms=np.std(cerebras_ttfts or 0) * 1000,
+        median_cerebras_ttft_ms=np.median(cerebras_ttfts or 0) * 1000,
+        percentiles_cerebras_ttft_ms=[(p, np.percentile(cerebras_ttfts or 0, p) * 1000)
+                             for p in selected_percentiles],
+        mean_cerebras_tpot_ms=np.mean(cerebras_tpots or 0) * 1000,
+        std_cerebras_tpot_ms=np.std(cerebras_tpots or 0) * 1000,
+        median_cerebras_tpot_ms=np.median(cerebras_tpots or 0) * 1000,
+        percentiles_cerebras_tpot_ms=[(p, np.percentile(cerebras_tpots or 0, p) * 1000)
+                             for p in selected_percentiles],
+        mean_cerebras_e2el_ms=np.mean(cerebras_e2els or 0) * 1000,
+        std_cerebras_e2el_ms=np.std(cerebras_e2els or 0) * 1000,
+        median_cerebras_e2el_ms=np.median(cerebras_e2els or 0) * 1000,
+        percentiles_cerebras_e2el_ms=[(p, np.percentile(cerebras_e2els or 0, p) * 1000)
+                                      for p in selected_percentiles]
     )
 
     return metrics, actual_output_lens
@@ -427,7 +584,7 @@ async def benchmark(
     api_url: str,
     base_url: str,
     model_id: str,
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: Optional[Union[PreTrainedTokenizerBase, None]],#PreTrainedTokenizerBase,
     input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float,
@@ -472,12 +629,15 @@ async def benchmark(
     )
     test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
+        logger.error("Initial test run failed - Please make sure benchmark arguments "
+        f"are correctly specified. Error: {test_output.error}")
         raise ValueError(
             "Initial test run failed - Please make sure benchmark arguments "
             f"are correctly specified. Error: {test_output.error}"
         )
     else:
         print("Initial test run completed. Starting main benchmark run...")
+        logger.info("Initial test run completed. Starting main benchmark run...")
 
     if profile:
         print("Starting profiler...")
@@ -499,6 +659,10 @@ async def benchmark(
     print(f"Traffic request rate: {request_rate}")
     print(f"Burstiness factor: {burstiness} ({distribution})")
     print(f"Maximum request concurrency: {max_concurrency}")
+
+    logger.info(f"Traffic request rate: {request_rate}")
+    logger.info(f"Burstiness factor: {burstiness} ({distribution})")
+    logger.info(f"Maximum request concurrency: {max_concurrency}")
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
@@ -561,12 +725,25 @@ async def benchmark(
             "Request throughput (req/s):", metrics.request_throughput
         )
     )
+
+    logger.info("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
+    logger.info("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    logger.info("{:<40} {:<10.2f}".format("Benchmark duration (s):",
+                                    benchmark_duration))
+    logger.info("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
+    logger.info("{:<40} {:<10}".format("Total generated tokens:",
+                                 metrics.total_output))
+    logger.info("{:<40} {:<10.2f}".format("Request throughput (req/s):",
+                                    metrics.request_throughput))
+
     if goodput_config_dict:
         print(
             "{:<40} {:<10.2f}".format(
                 "Request goodput (req/s):", metrics.request_goodput
             )
         )
+        logger.info("{:<40} {:<10.2f}".format("Request goodput (req/s):",
+                                        metrics.request_goodput))
     print(
         "{:<40} {:<10.2f}".format(
             "Output token throughput (tok/s):", metrics.output_throughput
@@ -577,6 +754,11 @@ async def benchmark(
             "Total Token throughput (tok/s):", metrics.total_token_throughput
         )
     )
+
+    logger.info("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
+                                    metrics.output_throughput))
+    logger.info("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
+                                    metrics.total_token_throughput))
 
     result = {
         "duration": benchmark_duration,
@@ -595,6 +777,11 @@ async def benchmark(
         "input_lens": [output.prompt_len for output in outputs],
         "output_lens": actual_output_lens,
         "ttfts": [output.ttft for output in outputs],
+
+        "cerebras_ttfts": [output.cerebras_ttft for output in outputs],
+        "cerebras_tpots": [output.cerebras_tpot for output in outputs],
+        "cerebras_e2els": [output.cerebras_e2el for output in outputs],
+
         "itls": [output.itl for output in outputs],
         "errors": [output.error for output in outputs],
     }
@@ -647,6 +834,11 @@ async def benchmark(
     process_one_metric("tpot", "TPOT", "Time per Output Token (excl. 1st token)")
     process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
+
+    process_one_metric("cerebras_ttft", "TTFT from Cerebras", "Time to First Token")
+    process_one_metric("cerebras_tpot", "TPOT from Cerebras",
+                       "Time per Output Token (excl. 1st token)")
+    process_one_metric("cerebras_e2el", "E2EL from Cerebras", "End-to-end Latency")
 
     print("=" * 50)
 
@@ -767,11 +959,12 @@ def main(args: argparse.Namespace):
         api_url = f"http://{args.host}:{args.port}{args.endpoint}"
         base_url = f"http://{args.host}:{args.port}"
 
-    tokenizer = get_tokenizer(
-        tokenizer_id,
-        trust_remote_code=args.trust_remote_code,
-        tokenizer_mode=args.tokenizer_mode,
-    )
+    # tokenizer = get_tokenizer(
+    #     tokenizer_id,
+    #     trust_remote_code=args.trust_remote_code,
+    #     tokenizer_mode=args.tokenizer_mode,
+    # )
+    tokenizer = None
 
     if args.dataset == "grammar":
         args.structure_type = "grammar"
@@ -779,6 +972,28 @@ def main(args: argparse.Namespace):
         args.structure_type = "regex"
     elif args.dataset == "choice":
         args.structure_type = "choice"
+    
+    elif args.dataset == "mt-bench-oai":
+        # Do not format the prompt, pass to message directly
+        input_requests = sample_mt_bench_oai(
+            dataset_path=args.dataset_path,
+            num_requests=args.num_prompts,
+        )
+        input_requests = [(prompt, prompt_len, output_len, None)
+                          for prompt, prompt_len,
+                          output_len in input_requests]
+        args.structure_type = "json"
+
+    elif args.dataset == "random":
+        input_requests = sample_random_requests(
+            prefix_len=args.random_prefix_len,
+            input_len=args.random_input_len,
+            output_len=args.random_output_len,
+            num_prompts=args.num_prompts,
+            range_ratio=args.random_range_ratio,
+            tokenizer=tokenizer,
+        )
+        args.structure_type = "json"
     else:
         args.structure_type = "json"
 
@@ -799,6 +1014,18 @@ def main(args: argparse.Namespace):
     input_requests = sample_requests(tokenizer, args)
 
     goodput_config_dict = check_goodput_args(args)
+
+    # Avoid GC processing "static" data - reduce pause times.
+    gc.collect()
+    gc.freeze()
+
+    # Configure logging to save to a file
+    current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
+    # log_file = file_name = f"{backend}-{args.model}-{current_dt}_output.log"
+    log_file = file_name = f"{backend}-{current_dt}_output.log"
+    os.makedirs(os.path.join(args.result_dir, 'logs'), exist_ok=True)
+    logging.basicConfig(filename=str(os.path.join(args.result_dir, 'logs', log_file)), level=logging.INFO)
+
 
     benchmark_result, ret = asyncio.run(
         benchmark(
@@ -822,8 +1049,8 @@ def main(args: argparse.Namespace):
     )
 
     # Save config and results to json
-    score = evaluate(ret, args)
-    print("correct_rate(%)", score, "\n")
+    # score = evaluate(ret, args)
+    # print("correct_rate(%)", score, "\n")
     if args.save_results:
         results = {
             "backend": backend,
@@ -835,7 +1062,7 @@ def main(args: argparse.Namespace):
             else "inf",
             "burstiness": args.burstiness,
             "max_concurrency": args.max_concurrency,
-            "correct_rate(%)": score,
+            # "correct_rate(%)": score,
         }
         results = {"outputs": ret, **results, **benchmark_result}
 
@@ -861,7 +1088,7 @@ def create_argument_parser():
     parser.add_argument(
         "--base-url",
         type=str,
-        default=None,
+        default='https://api.cerebras.ai',
         help="Server or API base url if not using http host and port.",
     )
     # Use 127.0.0.1 here instead of localhost to force the use of ipv4
@@ -870,13 +1097,13 @@ def create_argument_parser():
     parser.add_argument(
         "--endpoint",
         type=str,
-        default="/v1/completions",
+        default="/v1/chat/completions",
         help="API endpoint.",
     )
     parser.add_argument(
         "--dataset",
         default="json",
-        choices=["json", "json-unique", "grammar", "regex", "choice", "xgrammar_bench"],
+        choices=["json", "json-unique", "grammar", "regex", "choice", "xgrammar_bench", "random", "mt-bench-oai"],
     )
     parser.add_argument(
         "--json-schema-path", type=str, default=None, help="Path to json schema."
@@ -969,7 +1196,7 @@ def create_argument_parser():
     parser.add_argument(
         "--result-dir",
         type=str,
-        default=None,
+        default="./",
         help="Specify directory to save benchmark json results."
         "If not specified, results are saved in the current directory.",
     )
@@ -1032,6 +1259,43 @@ def create_argument_parser():
         help="Ratio of Structured Outputs requests",
     )
 
+    random_group = parser.add_argument_group("random dataset options")
+    random_group.add_argument(
+        "--random-input-len",
+        type=int,
+        default=1024,
+        help=
+        "Number of input tokens per request, used only for random sampling.",
+    )
+    random_group.add_argument(
+        "--random-output-len",
+        type=int,
+        default=128,
+        help=
+        "Number of output tokens per request, used only for random sampling.",
+    )
+    random_group.add_argument(
+        "--random-range-ratio",
+        type=float,
+        default=1.0,
+        help="Range of sampled ratio of input/output length, "
+        "used only for random sampling.",
+    )
+    random_group.add_argument(
+        "--random-prefix-len",
+        type=int,
+        default=0,
+        help="Number of fixed prefix tokens before random "
+        " context. The length range of context in a random "
+        " request is [random-prefix-len, "
+        " random-prefix-len + random-prefix-len * random-range-ratio).")
+
+    parser.add_argument("--dataset-path",
+                        type=str,
+                        default="./",
+                        help="Path to the sharegpt/sonnet dataset. "
+                        "Or the huggingface dataset ID if using HF dataset.")
+    
     return parser
 
 
