@@ -975,7 +975,7 @@ def main(args: argparse.Namespace):
 
     backend = args.backend
     model_id = args.model
-    tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
+    tokenizer_id = args.tokenizer if args.tokenizer is not None else "tiktoken/o200k_base"
 
     if args.base_url is not None:
         api_url = f"{args.base_url}{args.endpoint}"
@@ -1077,6 +1077,41 @@ def main(args: argparse.Namespace):
             "max_concurrency": args.max_concurrency,
             # "correct_rate(%)": score,
         }
+        csv_results = {
+            **results,
+            "successful requests": benchmark_result["completed"],
+            "Request throughput (req/s)": benchmark_result["request_throughput"],
+            "Output token throughput (tok/s)": benchmark_result["output_throughput"],
+            "Total token throughput (tok/s)": benchmark_result["total_token_throughput"],
+            "average input length": np.mean(benchmark_result["input_lens"]),
+            "average output length": np.mean(benchmark_result["output_lens"]),
+            "mean_ttft_ms": benchmark_result["mean_ttft_ms"],
+            "median_ttft_ms": benchmark_result["median_ttft_ms"],
+            "std_ttft_ms": benchmark_result["std_ttft_ms"],
+            "p99_ttft_ms": benchmark_result["p99_ttft_ms"],
+            "mean_tpot_ms": benchmark_result["mean_tpot_ms"],
+            "median_tpot_ms": benchmark_result["median_tpot_ms"],
+            "std_tpot_ms": benchmark_result["std_tpot_ms"],
+            "p99_tpot_ms": benchmark_result["p99_tpot_ms"],
+            "mean_itl_ms": benchmark_result["mean_itl_ms"],
+            "median_itl_ms": benchmark_result["median_itl_ms"],
+            "std_itl_ms": benchmark_result["std_itl_ms"],
+            "p99_itl_ms": benchmark_result["p99_itl_ms"],
+            "mean_cerebras_ttft_ms": benchmark_result["mean_cerebras_ttft_ms"],
+            "median_cerebras_ttft_ms": benchmark_result["median_cerebras_ttft_ms"],
+            "std_cerebras_ttft_ms": benchmark_result["std_cerebras_ttft_ms"],
+            "p99_cerebras_ttft_ms": benchmark_result["p99_cerebras_ttft_ms"],
+            "mean_cerebras_tpot_ms": benchmark_result["mean_cerebras_tpot_ms"],
+            "median_cerebras_tpot_ms": benchmark_result["median_cerebras_tpot_ms"],
+            "std_cerebras_tpot_ms": benchmark_result["std_cerebras_tpot_ms"],
+            "p99_cerebras_tpot_ms": benchmark_result["p99_cerebras_tpot_ms"],
+            "mean_cerebras_e2el_ms": benchmark_result["mean_cerebras_e2el_ms"],
+            "median_cerebras_e2el_ms": benchmark_result["median_cerebras_e2el_ms"],
+            "std_cerebras_e2el_ms": benchmark_result["std_cerebras_e2el_ms"],
+            "p99_cerebras_e2el_ms": benchmark_result["p99_cerebras_e2el_ms"],
+        
+            }
+        
         results = {"outputs": ret, **results, **benchmark_result}
 
         # Save to file
@@ -1086,6 +1121,16 @@ def main(args: argparse.Namespace):
             result_file_name = os.path.join(args.result_dir, result_file_name)
         with open(result_file_name, "w", encoding="utf-8") as outfile:
             json.dump(results, outfile, indent=4)
+
+        
+        df = pd.DataFrame([csv_results])
+        csv_path = result_file_name.replace('.txt', '.csv')
+        print(f"Saving benchmark results to {csv_path}")
+        # Write to CSV (append if exists, otherwise create new)
+        
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        write_header = not os.path.exists(csv_path) or os.stat(csv_path).st_size == 0
+        df.to_csv(csv_path, mode="a", header=write_header, index=False)
 
 
 def create_argument_parser():
@@ -1116,7 +1161,7 @@ def create_argument_parser():
     parser.add_argument(
         "--dataset",
         default="json",
-        choices=["json", "json-unique", "grammar", "regex", "choice", "xgrammar_bench", "random", "mt-bench-oai", "longcontext-qa"],
+        choices=["json", "json-unique", "grammar", "regex", "choice", "xgrammar_bench", "random", "longcontext-qa"],
     )
     parser.add_argument(
         "--json-schema-path", type=str, default=None, help="Path to json schema."
@@ -1240,7 +1285,8 @@ def create_argument_parser():
         default="ttft,tpot,itl,cerebras_ttft,cerebras_tpot,cerebras_e2el",
         help="Comma-separated list of selected metrics to report percentiles. "
         "This argument specifies the metrics to report percentiles. "
-        'Allowed metric names are "ttft", "tpot", "itl", "e2el". ' # fix this
+        'Allowed metric names are "ttft", "tpot", "itl", "e2el", "cerebras_ttft" ' \
+        ',"cerebras_tpot" , "cerebras_e2el" . ' 
         'Default value is "ttft,tpot,itl".',
     )
     parser.add_argument(

@@ -756,6 +756,7 @@ async def async_request_cerebras_chat_completions(
             output.success = False
             exc_info = sys.exc_info()
             output.error = "".join(traceback.format_exception(*exc_info))
+            print(f"Exception during request: {output.error}")
 
     if pbar:
         pbar.update(1)
