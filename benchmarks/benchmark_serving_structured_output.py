@@ -304,6 +304,7 @@ def sample_requests(
     elif args.dataset == "longcontext-qa":
         samples = sample_longcontext_requests(
             num_requests=args.num_prompts,
+            output_len = args.output_len,
             encoding_name="o200k_base",
         )
 
@@ -339,49 +340,6 @@ def sample_requests(
         ]
     return requests
 
-def load_mt_bench_data(data_file: str, begin: Optional[int] = None, end: Optional[int] = None):
-    """Load questions from a file."""
-    data = []
-    with open(data_file, "r") as d_file:
-        for line in d_file:
-            if line:
-                data.append(json.loads(line))
-    data = data[begin:end]
-    return pd.DataFrame(data)
-
-def sample_mt_bench_oai(
-    dataset_path: str,
-    num_requests: int,
-    encoding_name: str = "o200k_base"
-) -> List[Tuple[str, int, int]]:
-    encoding = tiktoken.get_encoding(encoding_name)
-
-    # Load the dataset subsets 21 to 51 to cover math, reasoning and coding as examples of stronger draft alignment.
-    mt_bench_df = load_mt_bench_data(os.path.join(dataset_path, "question.jsonl")) #, begin=21, end=51
-
-    # Load all MT bench sample data
-    # questions_df = load_mt_bench_data(os.path.join(dataset_path, "question.jsonl"))
-    # answers_df = load_mt_bench_data(os.path.join(dataset_path, "model_answer", "gpt-3.5-turbo.jsonl"))
-
-    # mt_bench_df = pd.merge(questions_df, answers_df, on="question_id", how="inner", suffixes=('_q', '_a'))
-
-    # Sample the rest of lines per request.
-    sampled_requests: List[Tuple[str, int, int]] = []
-    for row in mt_bench_df.itertuples():
-        if row.Index >= num_requests:
-            break
-        if type(row.reference) is not list:
-            continue
-        # print(row)
-        # print('--------------')
-        user_prompt = row.turns[0]
-        output = row.reference[0]
-        output_len = len(encoding.encode(output))
-        input_len = len(encoding.encode(user_prompt))
-        sampled_requests.append(
-            (user_prompt, input_len, output_len))
-
-    return sampled_requests
 
 def sample_random_requests(
     prefix_len: int,
@@ -416,6 +374,7 @@ def sample_random_requests(
 
 def sample_longcontext_requests(
         num_requests: int,
+        output_len: int = 256,
         encoding_name: str = "o200k_base"
     ) -> List[Tuple[str, int, int]]:
     """
@@ -429,9 +388,7 @@ def sample_longcontext_requests(
     
     for i in range(len(sentences)):
 
-        user_prompt = sentences.loc[i,'prompt'] + '\n Based on the given context, asnwer this: ' + sentences.loc[i,'question']
-        output = sentences.loc[i,'right_answer']
-        output_len = len(encoding.encode(output))
+        user_prompt = sentences.loc[i,'prompt']
         input_len = len(encoding.encode(user_prompt))
         sampled_requests.append(
             (user_prompt, input_len, output_len))
@@ -650,6 +607,8 @@ async def benchmark(
     input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float,
+    output_len: int,
+    temperature: float,
     disable_tqdm: bool,
     profile: bool,
     selected_percentile_metrics: list[str],
@@ -686,7 +645,8 @@ async def benchmark(
         prompt=test_request.prompt,
         api_url=api_url,
         prompt_len=test_request.prompt_len,
-        output_len=test_request.expected_output_len,
+        output_len=output_len,
+        temperature=temperature,
         ignore_eos=ignore_eos,
         extra_body=test_req_extra_body,
     )
@@ -709,7 +669,8 @@ async def benchmark(
             prompt=test_request.prompt,
             api_url=base_url + "/start_profile",
             prompt_len=test_request.prompt_len,
-            output_len=test_request.expected_output_len,
+            output_len=output_len,
+            temperature=temperature,
             ignore_eos=ignore_eos,
             extra_body=test_req_extra_body,
         )
@@ -747,7 +708,8 @@ async def benchmark(
             prompt=request.prompt,
             api_url=api_url,
             prompt_len=request.prompt_len,
-            output_len=request.expected_output_len,
+            output_len=output_len,
+            temperature=temperature,
             ignore_eos=ignore_eos,
             extra_body=extra_body,
         )
@@ -1041,6 +1003,8 @@ def main(args: argparse.Namespace):
 
     if args.dataset == "random":
         args.no_structured_output = True
+        logger.warning("Please note that a random dataset is not compatible with structured output. Setting no_structured_output to True.")
+        logger.warning("The throughput will be lower than expected due to the incompatibility of the draft model.")
     if args.no_structured_output:
         args.structured_output_ratio = 0
 
@@ -1057,7 +1021,7 @@ def main(args: argparse.Namespace):
     else:
         result_file_name = None
 
-    print(args)
+    #print(args)
     input_requests = sample_requests(tokenizer, args)
 
     goodput_config_dict = check_goodput_args(args)
@@ -1084,6 +1048,8 @@ def main(args: argparse.Namespace):
             input_requests=input_requests,
             request_rate=args.request_rate,
             burstiness=args.burstiness,
+            output_len=args.output_len,
+            temperature=args.temperature,
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
             selected_percentile_metrics=args.percentile_metrics.split(","),
@@ -1198,9 +1164,15 @@ def create_argument_parser():
         help="Number of output tokens.",
     )
     parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.2,
+        help="Temperature for sampling.",
+    )
+    parser.add_argument(
         "--request-rate",
         type=float,
-        default=float("inf"),
+        default=10, #float("inf"),
         help="Number of requests per second. If this is inf, "
         "then all the requests are sent at time 0. "
         "Otherwise, we use Poisson process or gamma distribution "
@@ -1243,7 +1215,7 @@ def create_argument_parser():
     parser.add_argument(
         "--result-dir",
         type=str,
-        default="./",
+        default="./results/",
         help="Specify directory to save benchmark json results."
         "If not specified, results are saved in the current directory.",
     )

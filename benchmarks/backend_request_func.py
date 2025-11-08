@@ -29,6 +29,7 @@ class RequestFuncInput:
     output_len: int
     model: str
     model_name: str | None = None
+    temperature: float = 0.2
     logprobs: int | None = None
     extra_body: dict | None = None
     multi_modal_content: dict | list[dict] | None = None
@@ -664,7 +665,7 @@ async def async_request_cerebras_chat_completions(
         except:
             response_format = None
             pass
-
+        
         payload = {
             "model": request_func_input.model_name \
                 if request_func_input.model_name else request_func_input.model,
@@ -674,7 +675,7 @@ async def async_request_cerebras_chat_completions(
                     "content": content
                 },
             ],
-            "temperature": 0.2,
+            "temperature": request_func_input.temperature,
             "max_tokens": request_func_input.output_len,
             "stream": True,
         }
@@ -706,14 +707,16 @@ async def async_request_cerebras_chat_completions(
                         if not chunk_bytes:
                             continue
 
-                        chunk = chunk_bytes.decode("utf-8").removeprefix(
-                            "data: ")
+                        chunk = chunk_bytes.decode("utf-8").removeprefix("data: ")
+                        
                         if chunk != "[DONE]":
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
-
+        
                             if choices := data.get("choices"):
+                                
                                 content = choices[0]["delta"].get("content")
+                                # print(f"Received content chunk: `{content}` with type {type(content)}")
                                 # First token
                                 if ttft == 0.0:
                                     if content is not None:
@@ -722,12 +725,10 @@ async def async_request_cerebras_chat_completions(
 
                                 # Decoding phase
                                 elif content is not None:
-                                    output.itl.append(timestamp -
-                                                      most_recent_timestamp)
+                                    output.itl.append(timestamp - most_recent_timestamp)
                                     generated_text += content or ""
                                 elif choices[0].get("finish_reason") is not None:
-                                    output.output_tokens = data.get("usage").get(
-                                        "completion_tokens")
+                                    output.output_tokens = data.get("usage").get("completion_tokens")
                                     # Get other fields from usage (time_info and others) to be plugged in downstream
                                     output.cerebras_queue_time = data.get("time_info").get("queue_time")
                                     output.cerebras_prompt_time = data.get("time_info").get("prompt_time")
@@ -740,12 +741,12 @@ async def async_request_cerebras_chat_completions(
 
                                 # generated_text += content or ""
                             elif usage := data.get("usage"):
-                                output.output_tokens = usage.get(
-                                    "completion_tokens")
+                                output.output_tokens = usage.get("completion_tokens")
 
                             most_recent_timestamp = timestamp
 
                     output.generated_text = generated_text
+                    #print(generated_text)
                     output.success = True
                     output.latency = most_recent_timestamp - st
                 else:
