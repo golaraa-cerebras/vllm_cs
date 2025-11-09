@@ -281,26 +281,6 @@ def sample_requests(
                     completion=completion,
                 )
             )
-    elif args.dataset == "mt-bench-oai":
-
-        
-
-        samples = sample_mt_bench_oai(
-            dataset_path=args.dataset_path,
-            num_requests=args.num_prompts,
-            encoding_name="o200k_base",
-        )
-        
-        requests = [
-            SampleRequest(
-                prompt=req[0],
-                prompt_len=req[1],
-                expected_output_len=req[2],
-                schema={},
-                structure_type="json",
-            )
-            for req in samples
-        ]
     elif args.dataset == "longcontext-qa":
         samples = sample_longcontext_requests(
             num_requests=args.num_prompts,
@@ -379,6 +359,7 @@ def sample_longcontext_requests(
     ) -> List[Tuple[str, int, int]]:
     """
     https://huggingface.co/datasets/Abzu/long-context-qa-df/viewer/default/train?row=0&views%5B%5D=train
+    has 346 samples of long context QA pairs.
     """
     encoding = tiktoken.get_encoding(encoding_name)
     from datasets import load_dataset
@@ -1217,7 +1198,7 @@ def create_argument_parser():
     parser.add_argument(
         "--request-rate",
         type=float,
-        default=10, #float("inf"),
+        default=float("inf"),
         help="Number of requests per second. If this is inf, "
         "then all the requests are sent at time 0. "
         "Otherwise, we use Poisson process or gamma distribution "

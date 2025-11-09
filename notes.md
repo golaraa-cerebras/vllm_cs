@@ -1,14 +1,26 @@
-To run the benchmark:
+To run the long context qa benchmark:
 ```
  python benchmarks/benchmark_serving_structured_output.py \
         --backend cerebras-chat \
-        --model llama-3.3-70b \
+        --model <model-string> \
         --dataset longcontext-qa \
-        --structured-output-ratio 1.0 \
-        --request-rate 5 \
-        --num-prompts 30
+        --max-concurrency <#concurrent-requests> \
+        --num-prompts <any number between 1 and 346 (dataset size)> \
+        --no-structured-output \
+        --output-len <output-length> \
+        --temperature <temperature> \
+        --save-results
 ```
-If you'd like to disable structured outputs, you can add:
+To run the random dataset benchmark:
 ```
---no-structured-output
+python benchmarks/benchmark_serving_structured_output.py \
+        --backend cerebras-chat \
+        --model llama3.1-8b \
+        --dataset random \
+        --max-concurrency 1 \
+        --num-prompts 100 \
+        --random-input-len 500 \
+        --random-output-len 100 \
+        --temperature 0.1 \
+        --save-results
 ```

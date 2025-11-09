@@ -716,7 +716,7 @@ async def async_request_cerebras_chat_completions(
                             if choices := data.get("choices"):
                                 
                                 content = choices[0]["delta"].get("content")
-                                # print(f"Received content chunk: `{content}` with type {type(content)}")
+                                # print(content)
                                 # First token
                                 if ttft == 0.0:
                                     if content is not None:
