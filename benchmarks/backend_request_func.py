@@ -715,7 +715,7 @@ async def async_request_cerebras_chat_completions(
                             if choices := data.get("choices"):
                                 
                                 content = choices[0]["delta"].get("content")
-                                print(content)
+                                # print(content)
                                 # First token
                                 if ttft == 0.0:
                                     if content is not None:
@@ -749,7 +749,7 @@ async def async_request_cerebras_chat_completions(
                     output.success = True
                     output.latency = most_recent_timestamp - st
 
-                    print(output)
+                    # print(output)
                 else:
                     output.error = response.reason or ""
                     output.success = False
