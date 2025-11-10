@@ -52,7 +52,6 @@ class RequestFuncOutput:
     cerebras_queue_time: float = 0.0
     cerebras_prompt_time: float = 0.0
     cerebras_completion_time: float = 0.0
-    cerebras_total_time: float = 0.0
     cerebras_ttft: float = 0.0
     cerebras_tpot: float = 0.0
     cerebras_e2el: float = 0.0
@@ -706,7 +705,7 @@ async def async_request_cerebras_chat_completions(
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
-
+                        
                         chunk = chunk_bytes.decode("utf-8").removeprefix("data: ")
                         
                         if chunk != "[DONE]":
@@ -716,7 +715,7 @@ async def async_request_cerebras_chat_completions(
                             if choices := data.get("choices"):
                                 
                                 content = choices[0]["delta"].get("content")
-                                # print(content)
+                                print(content)
                                 # First token
                                 if ttft == 0.0:
                                     if content is not None:
@@ -749,6 +748,8 @@ async def async_request_cerebras_chat_completions(
                     #print(generated_text)
                     output.success = True
                     output.latency = most_recent_timestamp - st
+
+                    print(output)
                 else:
                     output.error = response.reason or ""
                     output.success = False
