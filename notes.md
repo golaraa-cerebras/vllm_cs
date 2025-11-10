@@ -20,7 +20,7 @@ python benchmarks/benchmark_serving_structured_output.py \
         --max-concurrency 1 \
         --num-prompts 100 \
         --random-input-len 500 \
-        --random-output-len 100 \
+        --output-len 100 \
         --temperature 0.1 \
         --save-results
 ```

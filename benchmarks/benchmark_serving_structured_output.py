@@ -302,7 +302,7 @@ def sample_requests(
         samples = sample_random_requests(
             prefix_len= 0,
             input_len =  args.random_input_len,
-            output_len = args.random_output_len,
+            output_len = args.output_len,
             num_prompts = args.num_prompts,
             range_ratio = args.random_range_ratio,
             encoding_name="o200k_base",
@@ -1312,13 +1312,6 @@ def create_argument_parser():
         default=256,
         help=
         "Number of input tokens per request, used only for random sampling.",
-    )
-    random_group.add_argument(
-        "--random-output-len",
-        type=int,
-        default=128,
-        help=
-        "Number of output tokens per request, used only for random sampling.",
     )
     random_group.add_argument(
         "--random-range-ratio",
