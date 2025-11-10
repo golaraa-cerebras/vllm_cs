@@ -764,6 +764,110 @@ async def async_request_cerebras_chat_completions(
     return output
 
 
+async def async_request_cerebras_text_completions(
+    request_func_input: RequestFuncInput,
+    pbar: Optional[tqdm] = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    # print(f"api_url: {api_url}")
+    assert api_url.endswith(
+        "v1/completions"
+    ), "Cerebras Completions API URL must end with 'v1/completions'."
+
+    async with aiohttp.ClientSession(trust_env=True,
+                                     timeout=AIOHTTP_TIMEOUT) as session:
+                
+        payload = {
+            "model": request_func_input.model_name \
+                if request_func_input.model_name else request_func_input.model,
+            "prompt": request_func_input.prompt,
+            "temperature": request_func_input.temperature,
+            "max_tokens": request_func_input.output_len,
+            "stream": True,
+            "return_raw_tokens": True,
+
+        }
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {os.environ.get('CEREBRAS_API_KEY')}",
+        }
+
+        output = RequestFuncOutput()
+        output.prompt_len = request_func_input.prompt_len
+
+        generated_text = ""
+        ttft = 0.0
+        st = time.perf_counter()
+        most_recent_timestamp = st
+        try:
+            # print(f"URL: {api_url}")
+            # print("Payload:\n", json.dumps(payload, indent=4))
+            # print("Headers:\n", json.dumps(headers, indent=4))
+            async with session.post(url=api_url, json=payload,
+                                    headers=headers) as response:
+                if response.status == 200:
+                    async for chunk_bytes in response.content:
+                        chunk_bytes = chunk_bytes.strip()
+                        if not chunk_bytes:
+                            continue
+                        
+                        chunk = chunk_bytes.decode("utf-8").removeprefix("data: ")
+                        
+                        if True: #chunk != "[DONE]": #???
+                            timestamp = time.perf_counter()
+                            data = json.loads(chunk)
+        
+                            if choices := data.get("choices"):
+                                
+                                content = choices[0].get("tokens")
+                                # First token
+                                if ttft == 0.0:
+                                    if content is not None:
+                                        ttft = timestamp - st
+                                        output.ttft = ttft
+
+                                # Decoding phase
+                                elif content is not None:
+                                    output.itl.append((timestamp - most_recent_timestamp)/len(content))
+                                elif choices[0].get("finish_reason") is not None:
+                                    output.output_tokens = data.get("usage").get("completion_tokens")
+                                    # Get other fields from usage (time_info and others) to be plugged in downstream
+                                    output.cerebras_queue_time = data.get("time_info").get("queue_time")
+                                    output.cerebras_prompt_time = data.get("time_info").get("prompt_time")
+                                    output.cerebras_completion_time = data.get("time_info").get("completion_time")
+                                    output.cerebras_e2el = data.get("time_info").get("total_time")
+                                    output.cerebras_ttft = output.cerebras_queue_time + output.cerebras_prompt_time
+                                    output.cerebras_tpot = output.cerebras_completion_time/output.output_tokens
+                                    
+                                    
+
+                                # generated_text += content or ""
+                            elif usage := data.get("usage"):
+                                output.output_tokens = usage.get("completion_tokens")
+
+                            most_recent_timestamp = timestamp
+
+                    output.generated_text = ""
+                    #print(generated_text)
+                    output.success = True
+                    output.latency = most_recent_timestamp - st
+
+                    # print(output)
+                else:
+                    output.error = response.reason or ""
+                    output.success = False
+        except Exception:
+            output.success = False
+            exc_info = sys.exc_info()
+            output.error = "".join(traceback.format_exception(*exc_info))
+            print(f"Exception during request: {output.error}")
+
+    if pbar:
+        pbar.update(1)
+    return output
+
+
 ASYNC_REQUEST_FUNCS = {
     "tgi": async_request_tgi,
     "vllm": async_request_openai_completions,
@@ -777,6 +881,7 @@ ASYNC_REQUEST_FUNCS = {
     "sglang": async_request_openai_completions,
     "llama.cpp": async_request_openai_completions,
     "cerebras-chat": async_request_cerebras_chat_completions,
+    "cerebras-text": async_request_cerebras_text_completions,
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [
