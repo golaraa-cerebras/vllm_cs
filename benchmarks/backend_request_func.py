@@ -36,6 +36,7 @@ class RequestFuncInput:
     ignore_eos: bool = False
     language: str | None = None
     request_id: str | None = None
+    stream: bool = True
 
 
 @dataclass
@@ -44,7 +45,8 @@ class RequestFuncOutput:
     success: bool = False
     latency: float = 0.0
     output_tokens: int = 0
-    ttft: float = 0.0  # Time to first token
+    ttft: float = 0.0  # Time to first answer (content) token; 0 if none emitted
+    reasoning_ttft: float = 0.0  # Time to first reasoning token; 0 if no reasoning emitted
     itl: list[float] = field(default_factory=list)  # list of inter-token latencies
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
@@ -655,16 +657,14 @@ async def async_request_cerebras_chat_completions(
 
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
-        
+
         content = request_func_input.prompt
-        try:
-            if request_func_input.extra_body["structured_outputs"] == "json_object":
-                content += "\n Please provide the output in JSON format."
-                response_format = request_func_input.extra_body["structured_outputs"]
-        except:
-            response_format = None
-            pass
-        
+        response_format = None
+        extra = request_func_input.extra_body or {}
+        if extra.get("structured_outputs") == "json_object":
+            content += "\n Please provide the output in JSON format."
+            response_format = "json_object"
+
         payload = {
             "model": request_func_input.model_name \
                 if request_func_input.model_name else request_func_input.model,
@@ -675,13 +675,19 @@ async def async_request_cerebras_chat_completions(
                 },
             ],
             "temperature": request_func_input.temperature,
-            "max_tokens": request_func_input.output_len,
-            "stream": True,
+            "max_completion_tokens": request_func_input.output_len,
+            "stream": request_func_input.stream,
         }
 
         if response_format:
-            payload["response_format"] = {"type": response_format }
-        
+            payload["response_format"] = {"type": response_format}
+
+        if request_func_input.extra_body:
+            for k, v in request_func_input.extra_body.items():
+                if k == "structured_outputs":
+                    continue
+                payload[k] = v
+
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {os.environ.get('CEREBRAS_API_KEY')}",
@@ -692,72 +698,87 @@ async def async_request_cerebras_chat_completions(
 
         generated_text = ""
         ttft = 0.0
+        reasoning_ttft = 0.0
         st = time.perf_counter()
         most_recent_timestamp = st
         try:
-            # print(f"URL: {api_url}")
-            # print("Payload:\n", json.dumps(payload, indent=4))
-            # print("Headers:\n", json.dumps(headers, indent=4))
             async with session.post(url=api_url, json=payload,
                                     headers=headers) as response:
-                if response.status == 200:
+                if response.status != 200:
+                    output.error = response.reason or ""
+                    output.success = False
+                elif request_func_input.stream:
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
-                        
+
                         chunk = chunk_bytes.decode("utf-8").removeprefix("data: ")
-                        
-                        if chunk != "[DONE]":
-                            timestamp = time.perf_counter()
-                            data = json.loads(chunk)
-        
-                            if choices := data.get("choices"):
-                                
-                                content = choices[0]["delta"].get("content")
-                                # print(content)
-                                # First token
-                                if ttft == 0.0:
-                                    if content is not None:
+                        if chunk == "[DONE]":
+                            continue
+
+                        timestamp = time.perf_counter()
+                        data = json.loads(chunk)
+
+                        if choices := data.get("choices"):
+                            delta = choices[0]["delta"]
+                            content = delta.get("content")
+                            reasoning = delta.get("reasoning")
+                            has_token = content is not None or reasoning is not None
+
+                            if has_token:
+                                already_streaming = (
+                                    reasoning_ttft > 0.0 or ttft > 0.0
+                                )
+                                if already_streaming:
+                                    output.itl.append(timestamp - most_recent_timestamp)
+
+                                if reasoning is not None and reasoning_ttft == 0.0:
+                                    reasoning_ttft = timestamp - st
+                                    output.reasoning_ttft = reasoning_ttft
+                                if content is not None:
+                                    if ttft == 0.0:
                                         ttft = timestamp - st
                                         output.ttft = ttft
+                                    generated_text += content
 
-                                # Decoding phase
-                                elif content is not None:
-                                    output.itl.append(timestamp - most_recent_timestamp)
-                                    generated_text += content or ""
-                                elif choices[0].get("finish_reason") is not None:
-                                    output.output_tokens = data.get("usage").get("completion_tokens")
-                                    # Get other fields from usage (time_info and others) to be plugged in downstream
-                                    output.cerebras_queue_time = data.get("time_info").get("queue_time")
-                                    output.cerebras_prompt_time = data.get("time_info").get("prompt_time")
-                                    output.cerebras_completion_time = data.get("time_info").get("completion_time")
-                                    output.cerebras_e2el = data.get("time_info").get("total_time")
-                                    output.cerebras_ttft = output.cerebras_queue_time + output.cerebras_prompt_time
-                                    output.cerebras_tpot = output.cerebras_completion_time/output.output_tokens
-                                    
-                                    
+                        if usage := data.get("usage"):
+                            output.output_tokens = usage.get("completion_tokens")
+                        if time_info := data.get("time_info"):
+                            output.cerebras_queue_time = time_info.get("queue_time")
+                            output.cerebras_prompt_time = time_info.get("prompt_time")
+                            output.cerebras_completion_time = time_info.get("completion_time")
+                            output.cerebras_e2el = time_info.get("total_time")
+                            output.cerebras_ttft = output.cerebras_queue_time + output.cerebras_prompt_time
+                            if output.output_tokens:
+                                output.cerebras_tpot = output.cerebras_completion_time / output.output_tokens
 
-                                # generated_text += content or ""
-                            elif usage := data.get("usage"):
-                                output.output_tokens = usage.get("completion_tokens")
-
-                            most_recent_timestamp = timestamp
+                        most_recent_timestamp = timestamp
 
                     output.generated_text = generated_text
-                    #print(generated_text)
                     output.success = True
                     output.latency = most_recent_timestamp - st
-
-                    # print(output)
                 else:
-                    output.error = response.reason or ""
-                    output.success = False
+                    data = await response.json()
+                    output.latency = time.perf_counter() - st
+                    if choices := data.get("choices"):
+                        message = choices[0].get("message", {})
+                        output.generated_text = message.get("content") or ""
+                    if usage := data.get("usage"):
+                        output.output_tokens = usage.get("completion_tokens")
+                    if time_info := data.get("time_info"):
+                        output.cerebras_queue_time = time_info.get("queue_time")
+                        output.cerebras_prompt_time = time_info.get("prompt_time")
+                        output.cerebras_completion_time = time_info.get("completion_time")
+                        output.cerebras_e2el = time_info.get("total_time")
+                        output.cerebras_ttft = output.cerebras_queue_time + output.cerebras_prompt_time
+                        if output.output_tokens:
+                            output.cerebras_tpot = output.cerebras_completion_time / output.output_tokens
+                    output.success = True
         except Exception:
             output.success = False
             exc_info = sys.exc_info()
             output.error = "".join(traceback.format_exception(*exc_info))
-            print(f"Exception during request: {output.error}")
 
     if pbar:
         pbar.update(1)
@@ -769,10 +790,9 @@ async def async_request_cerebras_text_completions(
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
-    # print(f"api_url: {api_url}")
     assert api_url.endswith(
-        "v1/completions"
-    ), "Cerebras Completions API URL must end with 'v1/completions'."
+        "completions"
+    ), "Cerebras Completions API URL must end with 'completions'."
 
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
@@ -783,7 +803,7 @@ async def async_request_cerebras_text_completions(
             "prompt": request_func_input.prompt,
             "temperature": request_func_input.temperature,
             "max_tokens": request_func_input.output_len,
-            "stream": True,
+            "stream": request_func_input.stream,
             "return_raw_tokens": True,
 
         }
@@ -797,71 +817,77 @@ async def async_request_cerebras_text_completions(
         output.prompt_len = request_func_input.prompt_len
 
         generated_text = ""
+        streamed_token_count = 0
         ttft = 0.0
         st = time.perf_counter()
         most_recent_timestamp = st
         try:
-            # print(f"URL: {api_url}")
-            # print("Payload:\n", json.dumps(payload, indent=4))
-            # print("Headers:\n", json.dumps(headers, indent=4))
             async with session.post(url=api_url, json=payload,
                                     headers=headers) as response:
-                if response.status == 200:
+                if response.status != 200:
+                    output.error = response.reason or ""
+                    output.success = False
+                elif request_func_input.stream:
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
-                        
+
                         chunk = chunk_bytes.decode("utf-8").removeprefix("data: ")
-                        
-                        if True: #chunk != "[DONE]": #???
-                            timestamp = time.perf_counter()
-                            data = json.loads(chunk)
-        
-                            if choices := data.get("choices"):
-                                
-                                content = choices[0].get("tokens")
-                                # First token
-                                if ttft == 0.0:
-                                    if content is not None:
-                                        ttft = timestamp - st
-                                        output.ttft = ttft
+                        if chunk == "[DONE]":
+                            continue
 
-                                # Decoding phase
-                                elif content is not None:
-                                    output.itl.append((timestamp - most_recent_timestamp)/len(content))
-                                elif choices[0].get("finish_reason") is not None:
-                                    output.output_tokens = data.get("usage").get("completion_tokens")
-                                    # Get other fields from usage (time_info and others) to be plugged in downstream
-                                    output.cerebras_queue_time = data.get("time_info").get("queue_time")
-                                    output.cerebras_prompt_time = data.get("time_info").get("prompt_time")
-                                    output.cerebras_completion_time = data.get("time_info").get("completion_time")
-                                    output.cerebras_e2el = data.get("time_info").get("total_time")
-                                    output.cerebras_ttft = output.cerebras_queue_time + output.cerebras_prompt_time
-                                    output.cerebras_tpot = output.cerebras_completion_time/output.output_tokens
-                                    
-                                    
+                        timestamp = time.perf_counter()
+                        data = json.loads(chunk)
 
-                                # generated_text += content or ""
-                            elif usage := data.get("usage"):
-                                output.output_tokens = usage.get("completion_tokens")
+                        if choices := data.get("choices"):
+                            content = choices[0].get("tokens")
+                            if content is not None:
+                                streamed_token_count += len(content)
+                            if ttft == 0.0:
+                                if content is not None:
+                                    ttft = timestamp - st
+                                    output.ttft = ttft
+                            elif content is not None:
+                                output.itl.append(timestamp - most_recent_timestamp)
 
-                            most_recent_timestamp = timestamp
+                        if usage := data.get("usage"):
+                            output.output_tokens = usage.get("completion_tokens")
+                        if time_info := data.get("time_info"):
+                            output.cerebras_queue_time = time_info.get("queue_time")
+                            output.cerebras_prompt_time = time_info.get("prompt_time")
+                            output.cerebras_completion_time = time_info.get("completion_time")
+                            output.cerebras_e2el = time_info.get("total_time")
+                            output.cerebras_ttft = output.cerebras_queue_time + output.cerebras_prompt_time
+                            if output.output_tokens:
+                                output.cerebras_tpot = output.cerebras_completion_time / output.output_tokens
 
+                        most_recent_timestamp = timestamp
+
+                    if not output.output_tokens:
+                        output.output_tokens = streamed_token_count
                     output.generated_text = ""
-                    #print(generated_text)
                     output.success = True
                     output.latency = most_recent_timestamp - st
-
-                    # print(output)
                 else:
-                    output.error = response.reason or ""
-                    output.success = False
+                    data = await response.json()
+                    output.latency = time.perf_counter() - st
+                    if usage := data.get("usage"):
+                        output.output_tokens = usage.get("completion_tokens")
+                    if time_info := data.get("time_info"):
+                        output.cerebras_queue_time = time_info.get("queue_time")
+                        output.cerebras_prompt_time = time_info.get("prompt_time")
+                        output.cerebras_completion_time = time_info.get("completion_time")
+                        output.cerebras_e2el = time_info.get("total_time")
+                        output.cerebras_ttft = output.cerebras_queue_time + output.cerebras_prompt_time
+                        if output.output_tokens:
+                            output.cerebras_tpot = output.cerebras_completion_time / output.output_tokens
+                    output.generated_text = ""
+                    output.success = True
         except Exception:
             output.success = False
             exc_info = sys.exc_info()
             output.error = "".join(traceback.format_exception(*exc_info))
-            print(f"Exception during request: {output.error}")
 
     if pbar:
         pbar.update(1)

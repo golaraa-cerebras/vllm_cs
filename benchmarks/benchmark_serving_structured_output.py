@@ -70,10 +70,31 @@ except ImportError:
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
+# Mapping from user-facing metric name to the concrete attribute names that
+# carry its client-side and server-side measurements. A missing side means the
+# metric has no counterpart there (e.g. ITL is client-only).
+METRIC_VARIANTS: dict[str, list[str]] = {
+    "ttft": ["ttft", "cerebras_ttft"],
+    "reasoning_ttft": ["reasoning_ttft"],
+    "tpot": ["tpot", "cerebras_tpot"],
+    "itl": ["itl"],
+    "e2el": ["e2el", "cerebras_e2el"],
+    "network_rtt": ["network_rtt"],
+}
+
+
+def expand_metric_selection(names: list[str]) -> list[str]:
+    expanded: list[str] = []
+    for raw in names:
+        name = raw.strip()
+        expanded.extend(METRIC_VARIANTS.get(name, [name]))
+    return expanded
+
 
 @dataclass
 class BenchmarkMetrics:
     completed: int
+    no_answer_token: int  # successful requests that emitted reasoning but no answer
     total_input: int
     total_output: int
     request_throughput: float
@@ -84,6 +105,10 @@ class BenchmarkMetrics:
     median_ttft_ms: float
     std_ttft_ms: float
     percentiles_ttft_ms: list[tuple[float, float]]
+    mean_reasoning_ttft_ms: float
+    median_reasoning_ttft_ms: float
+    std_reasoning_ttft_ms: float
+    percentiles_reasoning_ttft_ms: list[tuple[float, float]]
     mean_tpot_ms: float
     median_tpot_ms: float
     std_tpot_ms: float
@@ -99,6 +124,10 @@ class BenchmarkMetrics:
     median_e2el_ms: float
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
+    mean_network_rtt_ms: float
+    median_network_rtt_ms: float
+    std_network_rtt_ms: float
+    percentiles_network_rtt_ms: list[tuple[float, float]]
     mean_cerebras_ttft_ms: float
     median_cerebras_ttft_ms: float
     std_cerebras_ttft_ms: float
@@ -442,7 +471,9 @@ def calculate_metrics(
     tpots: list[float] = []
     all_tpots: list[float] = []
     ttfts: list[float] = []
+    reasoning_ttfts: list[float] = []
     e2els: list[float] = []
+    network_rtts: list[float] = []
     cerebras_tpots: List[float] = []
     cerebras_ttfts: List[float] = []
     cerebras_e2els: List[float] = []
@@ -465,19 +496,25 @@ def calculate_metrics(
             actual_output_lens.append(output_len)
             total_input += input_requests[i].prompt_len
             tpot = 0
-            if output_len > 1:
-                latency_minus_ttft = outputs[i].latency - outputs[i].ttft
+            gen_start = outputs[i].reasoning_ttft or outputs[i].ttft
+            if output_len > 1 and gen_start > 0:
+                latency_minus_ttft = outputs[i].latency - gen_start
                 tpot = latency_minus_ttft / (output_len - 1)
                 tpots.append(tpot)
             outputs[i].tpot = tpot
             # Note: if output_len <= 1, we regard tpot as 0 for goodput
             all_tpots.append(tpot)
             itls += outputs[i].itl
-            ttfts.append(outputs[i].ttft)
+            if outputs[i].ttft > 0:
+                ttfts.append(outputs[i].ttft)
+            if outputs[i].reasoning_ttft > 0:
+                reasoning_ttfts.append(outputs[i].reasoning_ttft)
             e2els.append(outputs[i].latency)
             cerebras_ttfts.append(outputs[i].cerebras_ttft)
             cerebras_tpots.append(outputs[i].cerebras_tpot)
             cerebras_e2els.append(outputs[i].cerebras_e2el)
+            if outputs[i].cerebras_e2el > 0:
+                network_rtts.append(outputs[i].latency - outputs[i].cerebras_e2el)
             completed += 1
         else:
             actual_output_lens.append(0)
@@ -525,8 +562,13 @@ def calculate_metrics(
             "on the benchmark arguments.",
             stacklevel=2,
         )
+    no_answer_token = sum(
+        1 for o in outputs
+        if o.success and o.reasoning_ttft > 0 and o.ttft == 0
+    )
     metrics = BenchmarkMetrics(
         completed=completed,
+        no_answer_token=no_answer_token,
         total_input=total_input,
         total_output=sum(actual_output_lens),
         request_throughput=completed / dur_s,
@@ -539,6 +581,12 @@ def calculate_metrics(
         median_ttft_ms=np.median(ttfts or 0) * 1000,
         percentiles_ttft_ms=[
             (p, np.percentile(ttfts or 0, p) * 1000) for p in selected_percentiles
+        ],
+        mean_reasoning_ttft_ms=np.mean(reasoning_ttfts or 0) * 1000,
+        std_reasoning_ttft_ms=np.std(reasoning_ttfts or 0) * 1000,
+        median_reasoning_ttft_ms=np.median(reasoning_ttfts or 0) * 1000,
+        percentiles_reasoning_ttft_ms=[
+            (p, np.percentile(reasoning_ttfts or 0, p) * 1000) for p in selected_percentiles
         ],
         mean_tpot_ms=np.mean(tpots or 0) * 1000,
         std_tpot_ms=np.std(tpots or 0) * 1000,
@@ -557,6 +605,12 @@ def calculate_metrics(
         median_e2el_ms=np.median(e2els or 0) * 1000,
         percentiles_e2el_ms=[
             (p, np.percentile(e2els or 0, p) * 1000) for p in selected_percentiles
+        ],
+        mean_network_rtt_ms=np.mean(network_rtts or 0) * 1000,
+        std_network_rtt_ms=np.std(network_rtts or 0) * 1000,
+        median_network_rtt_ms=np.median(network_rtts or 0) * 1000,
+        percentiles_network_rtt_ms=[
+            (p, np.percentile(network_rtts or 0, p) * 1000) for p in selected_percentiles
         ],
         mean_cerebras_ttft_ms=np.mean(cerebras_ttfts or 0) *
                      1000,  # ttfts is empty if streaming is not supported by backend
@@ -598,6 +652,8 @@ async def benchmark(
     max_concurrency: int | None,
     structured_output_ratio: float,
     goodput_config_dict: dict[str, float] | None = None,
+    extra_body: dict | None = None,
+    stream: bool = True,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -617,8 +673,18 @@ async def benchmark(
         range(len(input_requests)), int(len(input_requests) * structured_output_ratio)
     )
 
+    def merge_extras(per_request_extras: dict | None) -> dict | None:
+        if per_request_extras is None and extra_body is None:
+            return None
+        merged: dict = {}
+        if extra_body:
+            merged.update(extra_body)
+        if per_request_extras:
+            merged.update(per_request_extras)
+        return merged
+
     test_request = input_requests[0]
-    test_req_extra_body = (
+    test_req_extra_body = merge_extras(
         prepare_extra_body(test_request) if 0 in structured_output_req_idx else None
     )
     test_input = RequestFuncInput(
@@ -630,6 +696,7 @@ async def benchmark(
         temperature=temperature,
         ignore_eos=ignore_eos,
         extra_body=test_req_extra_body,
+        stream=stream,
     )
     test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
@@ -681,7 +748,7 @@ async def benchmark(
     tasks: list[asyncio.Task] = []
     expected: list[str] = []
     async for i, request in get_request(input_requests, request_rate, burstiness):
-        extra_body = (
+        request_extras = merge_extras(
             prepare_extra_body(request) if i in structured_output_req_idx else None
         )
         request_func_input = RequestFuncInput(
@@ -692,7 +759,8 @@ async def benchmark(
             output_len=output_len,
             temperature=temperature,
             ignore_eos=ignore_eos,
-            extra_body=extra_body,
+            extra_body=request_extras,
+            stream=stream,
         )
         expected.append(request.completion)
         tasks.append(
@@ -719,6 +787,9 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    if metrics.no_answer_token:
+        print("{:<40} {:<10}".format(
+            "  ...of which emitted no answer:", metrics.no_answer_token))
 
     if max_concurrency is not None:
         print("{:<40} {:<10}".format("Maximum request concurrency:", max_concurrency))
@@ -734,6 +805,9 @@ async def benchmark(
 
     logger.info("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
     logger.info("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    if metrics.no_answer_token:
+        logger.info("{:<40} {:<10}".format(
+            "  ...of which emitted no answer:", metrics.no_answer_token))
     logger.info("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
     logger.info("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
     logger.info("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
@@ -783,8 +857,6 @@ async def benchmark(
     def process_one_metric(
         # E.g., "ttft"
         metric_attribute_name: str,
-        # E.g., "TTFT"
-        metric_name: str,
         # E.g., "Time to First Token"
         metric_header: str,
     ):
@@ -792,16 +864,18 @@ async def benchmark(
         # metric.
         if metric_attribute_name not in selected_percentile_metrics:
             return
+        if getattr(metrics, f"mean_{metric_attribute_name}_ms") == 0:
+            return
         print("{s:{c}^{n}}".format(s=metric_header, n=50, c="-"))
         print(
             "{:<40} {:<10.3f}".format(
-                f"Mean {metric_name} (ms):",
+                "Mean (ms):",
                 getattr(metrics, f"mean_{metric_attribute_name}_ms"),
             )
         )
         print(
             "{:<40} {:<10.3f}".format(
-                f"Median {metric_name} (ms):",
+                "Median (ms):",
                 getattr(metrics, f"median_{metric_attribute_name}_ms"),
             )
         )
@@ -809,13 +883,13 @@ async def benchmark(
         logger.info("{s:{c}^{n}}".format(s=metric_header, n=50, c="-"))
         logger.info(
             "{:<40} {:<10.3f}".format(
-                f"Mean {metric_name} (ms):",
+                "Mean (ms):",
                 getattr(metrics, f"mean_{metric_attribute_name}_ms"),
             )
         )
         logger.info(
             "{:<40} {:<10.3f}".format(
-                f"Median {metric_name} (ms):",
+                "Median (ms):",
                 getattr(metrics, f"median_{metric_attribute_name}_ms"),
             )
         )
@@ -832,19 +906,68 @@ async def benchmark(
         )
         for p, value in getattr(metrics, f"percentiles_{metric_attribute_name}_ms"):
             p_word = str(int(p)) if int(p) == p else str(p)
-            print("{:<40} {:<10.3f}".format(f"P{p_word} {metric_name} (ms):", value))
-            logger.info("{:<40} {:<10.3f}".format(f"P{p_word} {metric_name} (ms):", value))
+            print("{:<40} {:<10.3f}".format(f"P{p_word} (ms):", value))
+            logger.info("{:<40} {:<10.3f}".format(f"P{p_word} (ms):", value))
             result[f"p{p_word}_{metric_attribute_name}_ms"] = value
 
-    process_one_metric("ttft", "TTFT", "Time to First Token")
-    process_one_metric("tpot", "TPOT", "Time per Output Token (excl. 1st token)")
-    process_one_metric("itl", "ITL", "Inter-token Latency")
-    process_one_metric("e2el", "E2EL", "End-to-end Latency")
+    def process_grouped_metric(
+        metric_header: str,
+        cols: list[tuple[str, str]],
+    ):
+        cols = [(label, attr) for label, attr in cols
+                if attr in selected_percentile_metrics
+                and getattr(metrics, f"mean_{attr}_ms") > 0]
+        if not cols:
+            return
 
-    process_one_metric("cerebras_ttft", "TTFT from Cerebras", "Time to First Token")
-    process_one_metric("cerebras_tpot", "TPOT from Cerebras",
-                       "Time per Output Token (excl. 1st token)")
-    process_one_metric("cerebras_e2el", "E2EL from Cerebras", "End-to-end Latency")
+        label_w, col_w = 22, 14
+        sep_width = label_w + col_w * len(cols)
+        sep = "{s:{c}^{n}}".format(s=metric_header, n=sep_width, c="-")
+        print(sep)
+        logger.info(sep)
+
+        if len(cols) > 1:
+            col_header = f"{'':<{label_w}}" + "".join(f"{name:<{col_w}}" for name, _ in cols)
+            print(col_header)
+            logger.info(col_header)
+
+        def emit_row(prefix: str, stat: str):
+            values = [getattr(metrics, f"{stat}_{attr}_ms") for _, attr in cols]
+            line = f"{prefix:<{label_w}}" + "".join(f"{v:<{col_w}.3f}" for v in values)
+            print(line)
+            logger.info(line)
+
+        emit_row("Mean (ms):", "mean")
+        emit_row("Median (ms):", "median")
+
+        pcts = getattr(metrics, f"percentiles_{cols[0][1]}_ms")
+        for i, (p, _) in enumerate(pcts):
+            p_word = str(int(p)) if int(p) == p else str(p)
+            values = [getattr(metrics, f"percentiles_{attr}_ms")[i][1] for _, attr in cols]
+            line = f"P{p_word} (ms):"
+            line = f"{line:<{label_w}}" + "".join(f"{v:<{col_w}.3f}" for v in values)
+            print(line)
+            logger.info(line)
+
+        for _, attr in cols:
+            result[f"mean_{attr}_ms"] = getattr(metrics, f"mean_{attr}_ms")
+            result[f"median_{attr}_ms"] = getattr(metrics, f"median_{attr}_ms")
+            result[f"std_{attr}_ms"] = getattr(metrics, f"std_{attr}_ms")
+            for p, value in getattr(metrics, f"percentiles_{attr}_ms"):
+                p_word = str(int(p)) if int(p) == p else str(p)
+                result[f"p{p_word}_{attr}_ms"] = value
+
+    process_grouped_metric("Time to First Token (client)",
+                           [("Answer", "ttft"), ("Reasoning", "reasoning_ttft")])
+    process_grouped_metric("Time to First Token (Cerebras)",
+                           [("Cerebras", "cerebras_ttft")])
+    process_grouped_metric("Time per Output Token (excl. 1st token)",
+                           [("Client", "tpot"), ("Cerebras", "cerebras_tpot")])
+    process_one_metric("itl", "Inter-chunk Latency (client-side)")
+    process_grouped_metric("End-to-end Latency",
+                           [("Client", "e2el"), ("Cerebras", "cerebras_e2el")])
+    process_one_metric("network_rtt",
+                       "Network RTT (client latency - Cerebras total_time)")
 
     print("=" * 50)
 
@@ -1033,12 +1156,16 @@ def main(args: argparse.Namespace):
             temperature=args.temperature,
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
-            selected_percentile_metrics=args.percentile_metrics.split(","),
+            selected_percentile_metrics=expand_metric_selection(
+                args.percentile_metrics.split(",")
+            ),
             selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
             ignore_eos=args.ignore_eos,
             max_concurrency=args.max_concurrency,
             structured_output_ratio=args.structured_output_ratio,
             goodput_config_dict=goodput_config_dict,
+            extra_body=json.loads(args.extra_body) if args.extra_body else None,
+            stream=not args.no_stream,
         )
     )
 
@@ -1261,14 +1388,33 @@ def create_argument_parser():
         "Warning: ignore_eos is not supported in deepspeed_mii and tgi.",
     )
     parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="Disable streaming (sends stream=false). Client TTFT / ITL / "
+        "per-chunk timings are unavailable in this mode and will be hidden "
+        "from the report; Cerebras server-side metrics and end-to-end "
+        "latency are still recorded.",
+    )
+    parser.add_argument(
+        "--extra-body",
+        type=str,
+        default=None,
+        help='JSON object merged into every request payload (e.g. '
+        '\'{"reasoning_effort": "low"}\'). Useful for backend-specific '
+        "parameters like Cerebras's reasoning_effort or reasoning_format.",
+    )
+    parser.add_argument(
         "--percentile-metrics",
         type=str,
-        default="ttft,tpot,itl,cerebras_ttft,cerebras_tpot,cerebras_e2el",
-        help="Comma-separated list of selected metrics to report percentiles. "
-        "This argument specifies the metrics to report percentiles. "
-        'Allowed metric names are "ttft", "tpot", "itl", "e2el", "cerebras_ttft" ' \
-        ',"cerebras_tpot" , "cerebras_e2el" . ' 
-        'Default value is "ttft,tpot,itl".',
+        default="ttft,reasoning_ttft,tpot,itl,e2el,network_rtt",
+        help="Comma-separated list of selected metric types to report percentiles. "
+        'Allowed metric names are "ttft", "tpot", "itl", "e2el". For each name, '
+        "both client-side and Cerebras server-side variants are reported when "
+        'available (e.g. "ttft" yields both wall-clock TTFT and Cerebras TTFT; '
+        '"itl" has no server counterpart so only client is shown). You can also '
+        'pass concrete attribute names directly (e.g. "cerebras_ttft") to '
+        "restrict output to one side. "
+        'Default value is "ttft,tpot,itl,e2el".',
     )
     parser.add_argument(
         "--metric-percentiles",
